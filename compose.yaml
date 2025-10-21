@@ -1,0 +1,15 @@
+services:
+  terraform:
+    # docker compose run --rm terraform
+    image: hashicorp/terraform
+    tty: true
+    working_dir: /app
+    volumes:
+      - ./terraform:/app:delegated
+      - ~/.aws:/root/.aws:delegated
+  aws-cli:
+    # docker compose run --rm aws-cli
+    image: amazon/aws-cli
+    tty: true
+    volumes:
+      - ~/.aws:/root/.aws:delegated

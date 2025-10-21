@@ -1,0 +1,16 @@
+{
+  "name": "viewer-request-function",
+  "version": "1.0.0",
+  "description": "Lambda@Edge function for viewer request events",
+  "main": "index.mjs",
+  "scripts": {
+    "package": "zip -r function.zip index.mjs package.json"
+  },
+  "keywords": [
+    "lambda",
+    "lambda-edge",
+    "cloudfront"
+  ],
+  "author": "",
+  "license": "MIT"
+}

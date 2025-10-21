@@ -1,0 +1,11 @@
+# Example terraform.tfvars file
+# Copy this file to terraform.tfvars and customize the values
+
+aws_region   = "ap-northeast-1"
+project_name = "my-image-optimizer"
+
+# S3 bucket name for CloudFront origin (must be globally unique)
+s3_bucket_name = "my-image-optimizer-origin"
+
+# GitHub Actions configuration
+github_repo = "your-github-username/your-repo-name"

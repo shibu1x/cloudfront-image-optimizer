@@ -1,0 +1,84 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  init:
+    desc: Initialize Terraform with backend configuration
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform init -backend-config="backend.tfvars"
+
+  plan:
+    desc: Check infrastructure changes
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform plan
+
+  apply:
+    desc: Deploy infrastructure
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform apply
+
+  destroy:
+    desc: Destroy infrastructure
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform destroy
+
+  format:
+    desc: Format Terraform code
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform fmt -recursive
+
+  validate:
+    desc: Validate Terraform code
+    dir: terraform
+    cmds:
+      - docker compose run --rm terraform validate
+
+  clean:
+    desc: Remove temporary files
+    cmds:
+      - rm -rf terraform/.terraform
+      - rm -rf terraform/modules/lambda-edge/builds
+      - find lambda-functions -name "node_modules" -type d -exec rm -rf {} +
+      - find lambda-functions -name "*.zip" -type f -delete
+
+  install-deps:
+    desc: Install Lambda function dependencies
+    cmds:
+      - for: sources
+        cmd: |
+          echo "Installing dependencies in {{.ITEM}}"
+          cd {{.ITEM}} && npm install
+    sources:
+      - lambda-functions/viewer-request
+      - lambda-functions/origin-response
+
+  test:
+    desc: Run Lambda function tests
+    cmds:
+      - for: sources
+        cmd: |
+          echo "Testing {{.ITEM}}"
+          cd {{.ITEM}} && npm test
+    sources:
+      - lambda-functions/viewer-request
+      - lambda-functions/origin-response
+
+  lint:
+    desc: Run Lambda function linter
+    cmds:
+      - for: sources
+        cmd: |
+          echo "Linting {{.ITEM}}"
+          cd {{.ITEM}} && npm run lint
+    sources:
+      - lambda-functions/viewer-request
+      - lambda-functions/origin-response

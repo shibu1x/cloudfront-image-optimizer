@@ -1,0 +1,104 @@
+name: Cleanup Old Lambda Versions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  cleanup-lambda-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        function:
+          - name: viewer-request
+          - name: origin-response
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get function name
+        id: get-function-name
+        run: |
+          FUNCTION_NAME="${{ secrets.PROJECT_NAME }}-${{ matrix.function.name }}"
+          echo "function_name=${FUNCTION_NAME}" >> $GITHUB_OUTPUT
+          echo "Function: ${FUNCTION_NAME}"
+
+      - name: List and delete old versions
+        run: |
+          FUNCTION_NAME="${{ steps.get-function-name.outputs.function_name }}"
+          KEEP_COUNT="2"
+
+          echo "Fetching all versions for ${FUNCTION_NAME}..."
+
+          # Get all versions (excluding $LATEST)
+          VERSIONS=$(aws lambda list-versions-by-function \
+            --function-name ${FUNCTION_NAME} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Versions[?Version!=`$LATEST`].Version' \
+            --output text | tr '\t' '\n' | sort -rn)
+
+          TOTAL_VERSIONS=$(echo "${VERSIONS}" | wc -l)
+          echo "Total versions found: ${TOTAL_VERSIONS}"
+
+          if [ ${TOTAL_VERSIONS} -le ${KEEP_COUNT} ]; then
+            echo "Only ${TOTAL_VERSIONS} version(s) exist. No cleanup needed (keeping ${KEEP_COUNT})."
+            exit 0
+          fi
+
+          # Get versions to delete (skip the latest N versions)
+          VERSIONS_TO_DELETE=$(echo "${VERSIONS}" | tail -n +$((KEEP_COUNT + 1)))
+          DELETE_COUNT=$(echo "${VERSIONS_TO_DELETE}" | wc -l)
+
+          echo "Will delete ${DELETE_COUNT} old version(s), keeping the latest ${KEEP_COUNT}:"
+          echo "${VERSIONS_TO_DELETE}"
+
+          # Delete old versions
+          DELETED=0
+          FAILED=0
+          for VERSION in ${VERSIONS_TO_DELETE}; do
+            echo "Deleting version ${VERSION}..."
+            if aws lambda delete-function \
+              --function-name ${FUNCTION_NAME} \
+              --qualifier ${VERSION} \
+              --region ${{ env.AWS_REGION }} 2>&1; then
+              DELETED=$((DELETED + 1))
+              echo "✓ Deleted version ${VERSION}"
+            else
+              FAILED=$((FAILED + 1))
+              echo "✗ Failed to delete version ${VERSION}"
+            fi
+          done
+
+          echo ""
+          echo "=== Cleanup Summary ==="
+          echo "Total versions: ${TOTAL_VERSIONS}"
+          echo "Kept versions: ${KEEP_COUNT}"
+          echo "Deleted: ${DELETED}"
+          echo "Failed: ${FAILED}"
+
+          # Store results for summary
+          echo "deleted=${DELETED}" >> $GITHUB_OUTPUT
+          echo "failed=${FAILED}" >> $GITHUB_OUTPUT
+          echo "total=${TOTAL_VERSIONS}" >> $GITHUB_OUTPUT
+        id: cleanup
+
+      - name: Cleanup summary
+        if: always()
+        run: |
+          echo "## Cleanup Summary: ${{ matrix.function.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Function**: ${{ steps.get-function-name.outputs.function_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total versions**: ${{ steps.cleanup.outputs.total }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kept**: 2" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deleted**: ${{ steps.cleanup.outputs.deleted }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed**: ${{ steps.cleanup.outputs.failed }}" >> $GITHUB_STEP_SUMMARY

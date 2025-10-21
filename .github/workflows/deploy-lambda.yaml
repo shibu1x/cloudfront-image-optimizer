@@ -1,0 +1,115 @@
+name: Deploy Lambda@Edge Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'lambda-functions/**'
+      - '.github/workflows/deploy-lambda.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy-lambda:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        function:
+          - name: viewer-request
+            path: lambda-functions/viewer-request
+          - name: origin-response
+            path: lambda-functions/origin-response
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.function.path }}/package.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.function.path }}
+        run: npm ci --omit=dev
+
+      - name: Replace S3 bucket placeholder
+        working-directory: ${{ matrix.function.path }}
+        run: |
+          sed -i "s/__S3_BUCKET_PLACEHOLDER__/${{ secrets.S3_BUCKET }}/g" index.mjs
+
+      - name: Build function package
+        working-directory: ${{ matrix.function.path }}
+        run: npm run package
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get function name
+        id: get-function-name
+        run: |
+          FUNCTION_NAME="${{ secrets.PROJECT_NAME }}-${{ matrix.function.name }}"
+          echo "function_name=${FUNCTION_NAME}" >> $GITHUB_OUTPUT
+          echo "Deploying to function: ${FUNCTION_NAME}"
+
+      - name: Update Lambda function code
+        working-directory: ${{ matrix.function.path }}
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ steps.get-function-name.outputs.function_name }} \
+            --zip-file fileb://function.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for function update to complete
+        run: |
+          echo "Waiting for Lambda function update to complete..."
+          aws lambda wait function-updated-v2 \
+            --function-name ${{ steps.get-function-name.outputs.function_name }} \
+            --region ${{ env.AWS_REGION }}
+          echo "Function update completed"
+
+      - name: Publish new version
+        id: publish-version
+        run: |
+          VERSION=$(aws lambda publish-version \
+            --function-name ${{ steps.get-function-name.outputs.function_name }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Version' \
+            --output text)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Published version: ${VERSION}"
+
+      - name: Get function ARN with version
+        id: get-arn
+        run: |
+          QUALIFIED_ARN=$(aws lambda get-function \
+            --function-name ${{ steps.get-function-name.outputs.function_name }} \
+            --qualifier ${{ steps.publish-version.outputs.version }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Configuration.FunctionArn' \
+            --output text)
+          echo "qualified_arn=${QUALIFIED_ARN}" >> $GITHUB_OUTPUT
+          echo "Qualified ARN: ${QUALIFIED_ARN}"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Function**: ${{ matrix.function.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Function Name**: ${{ steps.get-function-name.outputs.function_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.publish-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ARN**: ${{ steps.get-arn.outputs.qualified_arn }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> To attach this version to CloudFront, run the 'Update CloudFront Distribution' workflow" >> $GITHUB_STEP_SUMMARY
