@@ -268,7 +268,8 @@ resource "aws_iam_role_policy" "lambda_update" {
           "lambda:PublishVersion",
           "lambda:GetFunction",
           "lambda:GetFunctionConfiguration",
-          "lambda:DeleteFunction"
+          "lambda:DeleteFunction",
+          "lambda:EnableReplication*"
         ]
         Resource = [
           module.viewer_request_function.function_arn,

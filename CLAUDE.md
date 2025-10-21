@@ -147,7 +147,9 @@ aws lambda update-function-code \
 
 5. **CloudFront Distribution**: CloudFront distribution is managed in `terraform/main.tf` with Lambda@Edge associations. ARNs must be versioned qualifiers (`:N` suffix), not `$LATEST`.
 
-6. **S3 Bucket Policy**: Direct S3 access is allowed for Lambda@Edge functions to read from `origin/*` and write to `resize/*`. CloudFront uses OAC for access.
+6. **Lambda@Edge Permissions**: The GitHub Actions role requires `lambda:EnableReplication*` permission to update CloudFront distributions with Lambda@Edge functions. This permission is included in the `lambda_update` policy in `terraform/main.tf:272`.
+
+7. **S3 Bucket Policy**: Direct S3 access is allowed for Lambda@Edge functions to read from `origin/*` and write to `resize/*`. CloudFront uses OAC for access.
 
 ### GitHub Actions Setup Requirements
 
