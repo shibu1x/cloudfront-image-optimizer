@@ -4,193 +4,330 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an AWS Lambda@Edge image optimization system that dynamically resizes images at CloudFront edge locations. The infrastructure is managed with Terraform and deployed via GitHub Actions using OIDC authentication.
+This is an AWS Lambda@Edge image optimization system that dynamically resizes images at CloudFront edge locations. Infrastructure is managed with Terraform and deployed via GitHub Actions using OIDC authentication.
 
-### Key Architecture
+**Key Architecture**:
+1. **Viewer Request** (`lambda-functions/viewer-request/`): URI rewriting based on `?d=WxH` query parameter and WebP detection
+2. **Origin Response** (`lambda-functions/origin-response/`): On-demand image resizing with Sharp, S3 caching (fire-and-forget), base64 response
+3. **Terraform**: Single-environment infrastructure, lambda-edge module with placeholder code, GitHub Actions deployment
+4. **CloudFront**: OAC for S3, Lambda@Edge associations with versioned ARNs
 
-1. **Viewer Request Function** (`lambda-functions/viewer-request/`): Intercepts CloudFront requests and rewrites URIs based on query parameters. Parses `?d=WxH` dimension parameter and detects WebP support from Accept headers to construct optimized paths like `/resize/{path}/{width}x{height}/{format}/{filename}`.
+## Critical Constraints & Common Pitfalls
 
-2. **Origin Response Function** (`lambda-functions/origin-response/`): Handles 404/403 responses for missing resized images. Fetches original from S3, resizes using Sharp library, uploads result to S3 (fire-and-forget), and returns base64-encoded image immediately. Uses pattern `origin/{subpath}/{filename}` for source images.
+### Lambda@Edge Specific Constraints
 
-3. **Terraform Structure**: Single-environment configuration with one reusable module:
-   - All infrastructure resources are defined directly in `terraform/main.tf`
-   - `terraform/modules/lambda-edge/`: Lambda@Edge function module with empty placeholder code (uses lifecycle ignore_changes for filename/hash)
-   - No environment separation - single `terraform.tfvars` and `backend.tfvars` files
+**IMPORTANT: These are non-negotiable AWS Lambda@Edge limitations that MUST be followed:**
 
-4. **Infrastructure Resources** (all in `main.tf`):
-   - S3 bucket with versioning disabled, encryption, lifecycle rules (resized images expire after 1 day)
-   - CloudFront distribution with OAC (Origin Access Control)
-   - Lambda@Edge functions (via module)
-   - GitHub Actions IAM role with OIDC trust
-   - CloudFront cache policies and origin request policies
-   - CloudWatch log groups for Lambda@Edge (in main region)
+1. **Region Requirement**:
+   - Lambda@Edge functions MUST be created in **us-east-1 only**
+   - Always use `provider = aws.us-east-1` alias in Terraform
+   - Never change this region or deployments will fail
 
-### Critical Constraints
+2. **No Environment Variables**:
+   - Lambda@Edge does NOT support environment variables
+   - S3 bucket name is hardcoded as `__S3_BUCKET_PLACEHOLDER__` in `origin-response/index.mjs`
+   - GitHub Actions workflow replaces this placeholder during deployment
+   - NEVER try to use Lambda environment variables or Terraform `environment {}` blocks
 
-- Lambda@Edge functions **must** be in us-east-1 region (enforced via provider alias)
-- Lambda@Edge cannot use environment variables (S3 bucket name hardcoded as `__S3_BUCKET_PLACEHOLDER__` in origin-response/index.mjs)
-- Function code uses `.mjs` extension (ES modules), but package.json references `index.js` - this is intentional for Lambda compatibility
-- Terraform ignores code changes after initial deployment (lifecycle ignore_changes in modules/lambda-edge/main.tf) - code updates go through GitHub Actions only
-- GitHub OIDC provider must exist before Terraform runs
-- Resized images lifecycle: hardcoded to 1 day expiration (not configurable via variables)
+3. **Response Size Limits**:
+   - Viewer/Origin request: 1MB maximum response size
+   - Origin response: 1MB maximum response size (base64-encoded images ~750KB actual size)
+   - Images larger than this will fail - this is an AWS hard limit
 
-### S3 Backend Configuration
+4. **CloudFront ARN Requirements**:
+   - Lambda@Edge associations MUST use **versioned ARNs** (e.g., `arn:...:function:name:5`)
+   - NEVER use `$LATEST` - CloudFront will reject it
+   - Always publish versions and use qualified ARNs
 
-Terraform uses S3 backend with partial configuration:
-- `terraform/backend.tfvars` contains bucket and region (not committed to git)
-- `terraform/backend.tfvars.example` is the template
-- State file path: `cloudfront/terraform.tfstate` (hardcoded in main.tf)
-- Encryption disabled, uses S3-based locking via `.terraform.lock.hcl`
+5. **Deployment Timing**:
+   - CloudFront distribution updates take 15-30 minutes to propagate
+   - Lambda@Edge function updates are not immediate
+   - Do not expect instant deployment results
+
+### Terraform Lifecycle Management
+
+**CRITICAL: Code deployment is split between Terraform and GitHub Actions:**
+
+1. **Terraform's Role**:
+   - Creates Lambda functions with **placeholder code only**
+   - Uses `lifecycle { ignore_changes = [filename, source_code_hash] }` in `terraform/modules/lambda-edge/main.tf`
+   - Manages infrastructure (S3, CloudFront, IAM, networking)
+   - NEVER manages actual Lambda function code after initial creation
+
+2. **GitHub Actions' Role**:
+   - Deploys ALL Lambda function code updates
+   - Replaces `__S3_BUCKET_PLACEHOLDER__` with actual bucket name
+   - Publishes new versions with qualified ARNs
+   - Updates CloudFront distribution (manual workflow)
+
+3. **Common Mistake**:
+   - DO NOT try to update Lambda code via Terraform
+   - DO NOT remove `ignore_changes` from lifecycle blocks
+   - DO NOT expect `terraform apply` to deploy code changes
+
+### Backend Configuration
+
+**State Management**:
+- Uses **local backend** (not S3)
+- State file: `terraform/terraform.tfstate`
+- State file is in `.gitignore` - never commit it
+- No backend configuration file needed (removed `backend.tfvars`)
+
+### File Extension vs Handler Path
+
+**Handler Configuration**:
+- Files use `.mjs` extension (ES modules): `index.mjs`
+- Handler path is `index.handler` (references base name without extension)
+- This is correct and intentional - Lambda Node.js runtime supports this
+- NEVER change handler to `index.mjs.handler`
+
+### AWS SDK in Lambda Runtime
+
+**Dependencies**:
+- `@aws-sdk/client-s3` is specified as **devDependency** in `origin-response/package.json`
+- This is CORRECT because AWS Lambda runtime includes AWS SDK v3 by default
+- The SDK is NOT bundled in function.zip (excluded by `--omit=dev`)
+- Only `sharp` is bundled as a production dependency
+- NEVER move `@aws-sdk/client-s3` to dependencies
 
 ## Commands
 
-### Task Runner (Preferred Method)
-
-This project uses [Task](https://taskfile.dev/). All commands assume you're in the project root.
+### Terraform Operations (via Task)
 
 ```bash
-# Terraform operations
-task init                    # Initialize Terraform with backend config
-task plan                    # Plan changes
-task apply                   # Apply changes
-task destroy                 # Destroy infrastructure
-
-# Lambda development
-task install-deps            # Install dependencies for all functions
-task test                    # Run tests for all functions
-task lint                    # Run linter for all functions
-
-# Maintenance
-task format                  # Format Terraform code
-task validate                # Validate Terraform configuration
-task clean                   # Remove .terraform, builds, node_modules
+task init      # Initialize Terraform (local backend)
+task plan      # Plan infrastructure changes
+task apply     # Apply infrastructure changes
+task destroy   # Destroy all resources
+task format    # Format Terraform code
+task validate  # Validate Terraform configuration
 ```
 
-### Direct Commands (Alternative)
-
-If Task is not available:
+### Lambda Function Development
 
 ```bash
-# Terraform via Docker Compose
-cd terraform
-docker compose run --rm terraform init -backend-config="backend.tfvars"
-docker compose run --rm terraform plan
-docker compose run --rm terraform apply
+task install-deps  # Install dependencies for all functions
+task test          # Run tests (if configured)
+task lint          # Run ESLint
+task clean         # Remove .terraform, node_modules, *.zip
 
-# Lambda function development
+# Local testing
 cd lambda-functions/viewer-request
-npm install
-npm test                     # Run all tests
-npm run lint                 # Run ESLint
-npm run package              # Create function.zip
+node debug.mjs     # Test viewer-request locally
 
-# Manual Lambda deployment (rarely needed - prefer GitHub Actions)
+cd lambda-functions/origin-response
+node debug.mjs     # Test origin-response (requires S3 access)
+```
+
+### Manual Lambda Deployment (Rare)
+
+```bash
+cd lambda-functions/viewer-request
+npm ci --omit=dev
+npm run package
 aws lambda update-function-code \
   --function-name {PROJECT_NAME}-viewer-request \
   --zip-file fileb://function.zip \
   --region us-east-1
 ```
 
-### GitHub Actions Workflows
+**WARNING**: Remember to replace `__S3_BUCKET_PLACEHOLDER__` before manual deployment.
 
-1. **deploy-lambda.yaml**: Push to main branch automatically deploys Lambda functions
-   - Detects changes under `lambda-functions/`
-   - Runs tests (continues on failure)
-   - Replaces `__S3_BUCKET_PLACEHOLDER__` with actual bucket from secrets
-   - Builds zip package excluding test files
-   - Updates Lambda code via OIDC authentication
-   - Publishes new version and outputs qualified ARN
-
-2. **update-cloudfront.yaml**: Manual workflow to update CloudFront distribution with latest Lambda versions
-   - Finds CloudFront distribution by project name (no environment suffix)
-   - Fetches latest Lambda function versions
-   - Updates Lambda@Edge associations
-   - Triggered via `workflow_dispatch`
-
-3. **cleanup-lambda-versions.yaml**: Manual workflow to delete old Lambda versions
-   - Keeps latest 2 versions (hardcoded, not configurable)
-   - Deletes older versions to reduce clutter
-   - Triggered via `workflow_dispatch` (no inputs required)
-
-## Important Implementation Notes
+## Important Implementation Details
 
 ### When Modifying Lambda Functions
 
-1. **S3 Bucket Configuration**: The deploy-lambda workflow automatically replaces `__S3_BUCKET_PLACEHOLDER__` with the value from GitHub Secrets (`S3_BUCKET`). Do not hardcode bucket names in the source code.
+1. **Viewer Request Function**:
+   - Zero dependencies (lightweight)
+   - Rewrites URI from `/path/file.jpg?d=300x300` to `/resize/path/300x300/webp/file.jpg`
+   - Detects WebP from `Accept: image/webp` header
+   - Returns modified `request` object to CloudFront
 
-2. **Handler Path**: Lambda handler is `index.handler` but files are `.mjs` - this works because Lambda Node.js runtime supports ES modules
+2. **Origin Response Function**:
+   - Dependencies: `sharp` (production), `@aws-sdk/client-s3` (devDependency - provided by Lambda runtime)
+   - Processes 404/403 responses only
+   - Fetches from S3: `origin/{subpath}/{filename}`
+   - Resizes with Sharp: `fit: inside`, `withoutEnlargement: true`, auto-rotation
+   - Uploads to S3: `resize/{path}/{width}x{height}/{format}/{filename}` (async fire-and-forget)
+   - Returns base64-encoded image immediately (does not wait for upload)
+   - Max dimensions: 4000px (validated before processing)
 
-3. **Sharp Library**: Origin-response uses Sharp for image processing - it has native dependencies that require Linux build environment (handled automatically by GitHub Actions using `npm ci --omit=dev`)
+3. **S3 Bucket Name Replacement**:
+   - Source code contains `__S3_BUCKET_PLACEHOLDER__`
+   - GitHub Actions workflow uses `sed` to replace with actual bucket from secrets
+   - Happens in `.github/workflows/deploy-lambda.yaml` during build step
+   - Never hardcode bucket names in source code
 
-4. **Response Size Limits**: Lambda@Edge viewer/origin request functions have 1MB response limit; origin-response can return up to 1MB base64-encoded image
-
-5. **Testing**: Each function includes `debug.mjs` for local testing. Run with `node debug.mjs` to simulate CloudFront events.
+4. **Package Building**:
+   - `npm ci --omit=dev` excludes devDependencies (AWS SDK not bundled)
+   - `npm run package` creates function.zip with index.mjs + package.json + node_modules/
+   - Sharp includes native Linux binaries (compiled during npm install in GitHub Actions)
 
 ### When Modifying Terraform
 
-1. **Provider Context**: Lambda@Edge resources must use `provider = aws.us-east-1` alias (already configured in modules)
+1. **Provider Configuration**:
+   - Primary: `aws` (region from `var.aws_region`, default: "ap-northeast-1")
+   - Alias: `aws.us-east-1` (hardcoded to us-east-1 for Lambda@Edge)
+   - Both have default tags: `Project` and `ManagedBy`
 
-2. **State Management**: Uses S3 backend with partial configuration. Must specify `-backend-config` during `terraform init`:
-   ```bash
-   terraform init -backend-config="backend.tfvars"
-   ```
+2. **Lambda@Edge Module** (`terraform/modules/lambda-edge/`):
+   - Creates empty placeholder Lambda with minimal code
+   - Required variables: `function_name`, `log_region`
+   - Optional: `s3_bucket_arn` (for S3 permissions), `timeout`, `memory_size`, `runtime`
+   - ALWAYS include `providers = { aws.us-east-1 = aws.us-east-1 }`
+   - `var.log_region` is required (no default) - specifies where CloudWatch logs aggregate
 
-3. **No Environment Separation**:
-   - Single `terraform.tfvars` and `backend.tfvars` (not committed)
-   - Use `.example` files as templates
-   - Function naming: `{PROJECT_NAME}-viewer-request`, `{PROJECT_NAME}-origin-response` (no environment suffix)
+3. **CloudFront Distribution** (`terraform/main.tf`):
+   - Lambda associations use `module.*.qualified_arn` (versioned ARN)
+   - `wait_for_deployment = false` for faster Terraform apply
+   - Cache policy whitelists: `Accept` header, `d` query string
+   - Origin path: `/origin` (S3 subdirectory)
 
-4. **Module Updates**: The lambda-edge module is in `terraform/modules/lambda-edge/`. If changing Lambda function configuration, note that:
-   - Module creates empty placeholder Lambda functions
-   - Actual code deployment happens via GitHub Actions
-   - `var.log_region` is required (not optional, no default value)
+4. **S3 Bucket Lifecycle** (`terraform/main.tf:82-114`):
+   - Resized images (`resize/` prefix) expire after **7 days** (hardcoded)
+   - Incomplete multipart uploads aborted after 7 days
+   - NOT configurable via variables - directly change in main.tf if needed
 
-5. **CloudFront Distribution**: CloudFront distribution is managed in `terraform/main.tf` with Lambda@Edge associations. ARNs must be versioned qualifiers (`:N` suffix), not `$LATEST`.
+5. **IAM Permissions**:
+   - GitHub Actions role: Lambda update, CloudFront management, `lambda:EnableReplication*`
+   - Lambda execution roles: S3 read from `origin/*`, S3 write to `resize/*`
+   - CloudWatch Logs restricted to `var.log_region` only
 
-6. **Lambda@Edge Permissions**: The GitHub Actions role requires `lambda:EnableReplication*` permission to update CloudFront distributions with Lambda@Edge functions. This permission is included in the `lambda_update` policy in `terraform/main.tf:272`.
+6. **Versioned ARNs**:
+   - Lambda@Edge module outputs `qualified_arn` with `:1` version suffix
+   - CloudFront requires this for Lambda associations
+   - GitHub Actions publishes new versions and updates CloudFront separately
 
-7. **S3 Bucket Policy**: Direct S3 access is allowed for Lambda@Edge functions to read from `origin/*` and write to `resize/*`. CloudFront uses OAC for access.
+### When Modifying GitHub Actions Workflows
 
-### GitHub Actions Setup Requirements
+1. **deploy-lambda.yaml**:
+   - Triggered on push to main with changes in `lambda-functions/`
+   - Matrix builds both functions in parallel
+   - Key step: `sed -i "s/__S3_BUCKET_PLACEHOLDER__/${{ secrets.S3_BUCKET }}/g"`
+   - Uses OIDC authentication (no long-lived credentials)
+   - Publishes version after code update: `aws lambda publish-version`
 
-GitHub repository secrets needed:
-- `AWS_ROLE_ARN`: Output from Terraform (`github_actions_role_arn`)
-- `PROJECT_NAME`: Used to construct function names (e.g., "blog-media")
-- `S3_BUCKET`: S3 origin bucket name (replaced in code during deployment)
+2. **update-cloudfront.yaml**:
+   - Manual trigger only (`workflow_dispatch`)
+   - Finds CloudFront distribution by project name comment
+   - Uses `jq` to update Lambda associations in distribution config
+   - Requires ETag for conditional update (prevents conflicts)
 
-Function naming convention: `{PROJECT_NAME}-{function-type}` (no environment suffix)
+3. **cleanup-lambda-versions.yaml**:
+   - Manual trigger, keeps latest 2 versions (hardcoded in workflow)
+   - Deletes older versions: `aws lambda delete-function --qualifier {VERSION}`
 
-### Terraform Variables
+### GitHub Secrets Required
 
-Required variables in `terraform.tfvars`:
-- `project_name`: Project name for resource naming
-- `s3_bucket_name`: S3 bucket name for CloudFront origin (must be globally unique)
-- `github_repo`: GitHub repository in format "owner/repo"
+- `AWS_ROLE_ARN`: GitHub Actions IAM role ARN (from Terraform output)
+- `PROJECT_NAME`: Used for function naming: `{PROJECT_NAME}-viewer-request`
+- `S3_BUCKET`: Replaces `__S3_BUCKET_PLACEHOLDER__` during deployment
 
-Optional variables with defaults:
-- `aws_region`: AWS region for main resources (default: "ap-northeast-1")
+## Request Flow Architecture
 
-Note: `resized_images_expiration_days` was removed - expiration is hardcoded to 1 day in main.tf
+```
+User Request: /blog/image.jpg?d=300x300 (Accept: image/webp)
+    ↓
+CloudFront → Lambda@Edge (Viewer Request)
+    ↓ Rewrites URI to: /resize/blog/300x300/webp/image.jpg
+CloudFront Cache Check
+    ↓ Cache MISS
+S3 Origin Check: /resize/blog/300x300/webp/image.jpg
+    ↓ 404 Not Found
+Lambda@Edge (Origin Response)
+    ↓ Fetch original: origin/blog/image.jpg
+    ↓ Resize with Sharp
+    ↓ Upload to S3: resize/blog/300x300/webp/image.jpg (async)
+    ↓ Return base64-encoded image immediately
+CloudFront caches response (Cache-Control: max-age=86400)
+    ↓
+User receives resized image
+```
+
+## S3 Bucket Structure
+
+```
+s3://{bucket-name}/
+├── origin/                  # Original images (uploaded by user)
+│   └── blog/
+│       └── image.jpg
+└── resize/                  # Auto-generated resized images (7-day lifecycle)
+    └── blog/
+        └── 300x300/
+            └── webp/
+                └── image.jpg
+```
+
+## Terraform Variables
+
+**Required** (in `terraform.tfvars`):
+- `project_name`: Resource naming prefix
+- `s3_bucket_name`: Globally unique S3 bucket name
+- `github_repo`: Format "owner/repo" for OIDC trust
+
+**Optional** (with defaults):
+- `aws_region`: Main region (default: "ap-northeast-1")
+
+**Removed Variables**:
+- `resized_images_expiration_days`: Now hardcoded to 7 days in main.tf:95
 
 ## Deployment Flow
 
-1. **Initial Setup**:
-   - Create GitHub OIDC provider in AWS (one-time per account):
-     ```bash
-     aws iam create-open-id-connect-provider \
-       --url https://token.actions.githubusercontent.com \
-       --client-id-list sts.amazonaws.com \
-       --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
-     ```
-   - Copy `backend.tfvars.example` and `terraform.tfvars.example` to actual files
-   - Configure with your values
-   - Run `task init` to initialize Terraform with backend
-   - Run `task apply` to create Lambda functions, S3 bucket, CloudFront distribution, and GitHub Actions IAM role
+1. **Initial Setup** (one-time):
+   - Create GitHub OIDC provider in AWS
+   - Copy `terraform.tfvars.example` to `terraform.tfvars`
+   - Run `task init && task apply`
+   - Configure GitHub Secrets (AWS_ROLE_ARN, PROJECT_NAME, S3_BUCKET)
 
-2. **Code Deployment**:
-   - Push code to main branch → GitHub Actions builds and deploys → publishes versioned ARN
-   - Manually trigger "Update CloudFront Distribution" workflow to attach new Lambda versions
+2. **Code Deployment** (automatic):
+   - Push to main → GitHub Actions deploys Lambda functions
+   - Publishes new versions with qualified ARNs
 
-3. **Version Cleanup** (optional):
+3. **CloudFront Update** (manual):
+   - Manually trigger "Update CloudFront Distribution" workflow
+   - Updates Lambda@Edge associations with latest versions
+   - Propagates in 15-30 minutes
+
+4. **Version Cleanup** (optional):
    - Manually trigger "Cleanup Old Lambda Versions" workflow
-   - Keeps latest 2 versions, removes older versions
+   - Keeps latest 2 versions, deletes older ones
+
+## Common Mistakes to Avoid
+
+1. ❌ Adding environment variables to Lambda@Edge functions
+2. ❌ Using `$LATEST` ARN for CloudFront associations
+3. ❌ Deploying Lambda@Edge to regions other than us-east-1
+4. ❌ Trying to update Lambda code with `terraform apply`
+5. ❌ Hardcoding S3 bucket name in source code
+6. ❌ Moving `@aws-sdk/client-s3` to dependencies (it's provided by Lambda runtime)
+7. ❌ Removing `lifecycle { ignore_changes }` from Lambda resources
+8. ❌ Expecting immediate CloudFront distribution updates (15-30 min propagation)
+9. ❌ Committing `terraform.tfstate` to git
+10. ❌ Using `backend.tfvars` (backend is now local, not S3)
+
+## File Locations Reference
+
+| Path | Purpose |
+|------|---------|
+| `lambda-functions/viewer-request/index.mjs` | URI rewrite logic |
+| `lambda-functions/origin-response/index.mjs` | Image resizing with Sharp |
+| `terraform/main.tf` | All infrastructure resources |
+| `terraform/modules/lambda-edge/main.tf` | Reusable Lambda@Edge module |
+| `terraform/variables.tf` | Variable definitions |
+| `terraform/outputs.tf` | Output definitions (GitHub Actions role ARN, etc.) |
+| `.github/workflows/deploy-lambda.yaml` | Automatic Lambda deployment |
+| `.github/workflows/update-cloudfront.yaml` | Manual CloudFront update |
+| `.github/workflows/cleanup-lambda-versions.yaml` | Manual version cleanup |
+| `Taskfile.yaml` | Task automation (init, plan, apply, etc.) |
+| `compose.yaml` | Docker services for Terraform/AWS CLI |
+
+## Key Technical Decisions
+
+1. **Fire-and-forget S3 upload**: Origin-response returns image immediately without waiting for S3 upload to complete (better performance)
+2. **Placeholder replacement**: S3 bucket name replaced at build time (avoids environment variables limitation)
+3. **Split deployment**: Terraform for infrastructure, GitHub Actions for code (avoids Terraform state drift)
+4. **OIDC authentication**: Modern keyless approach (no long-lived AWS credentials in GitHub)
+5. **Local backend**: Simplified state management (no S3 backend needed for single-developer projects)
+6. **Versioned ARNs**: CloudFront requires explicit versions (not $LATEST)
+7. **Sharp native binaries**: Built in Linux environment via GitHub Actions (not buildable on macOS)
+8. **7-day lifecycle**: Resized images expire after 7 days (reduces S3 storage costs)

@@ -7,12 +7,6 @@ terraform {
       version = "~> 5.0"
     }
   }
-
-  backend "s3" {
-    key          = "cloudfront/terraform.tfstate"
-    encrypt      = false
-    use_lockfile = true
-  }
 }
 
 provider "aws" {
