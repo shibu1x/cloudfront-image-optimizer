@@ -1,2 +1,0 @@
-bucket = "your-terraform-state-bucket"
-region = "ap-northeast-1"

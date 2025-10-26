@@ -15,8 +15,7 @@ This project provides an AWS Lambda@Edge-based image resizing system that dynami
 │   ├── main.tf               # Main infrastructure (S3, CloudFront, IAM, etc.)
 │   ├── variables.tf          # Variable definitions
 │   ├── outputs.tf            # Output definitions
-│   ├── terraform.tfvars.example    # Example variables file
-│   └── backend.tfvars.example      # Backend configuration template
+│   └── terraform.tfvars.example    # Example variables file
 ├── .github/
 │   └── workflows/            # CI/CD workflows
 │       ├── deploy-lambda.yaml          # Lambda function deployment
@@ -82,23 +81,7 @@ S3 Bucket:
 - [Task](https://taskfile.dev/) (optional, task runner)
 - Docker (optional, for Terraform via Docker Compose)
 
-### 1. Configure Backend
-
-Create backend configuration file:
-
-```bash
-# Copy template
-cp terraform/backend.tfvars.example terraform/backend.tfvars
-
-# Edit and set your S3 bucket name for Terraform state
-# Example:
-# bucket = "my-terraform-state"
-# region = "ap-northeast-1"
-```
-
-**Note**: Add `terraform/backend.tfvars` to `.gitignore` for security.
-
-### 2. Create Variables File
+### 1. Create Variables File
 
 ```bash
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
@@ -112,9 +95,9 @@ github_repo    = "your-username/your-repo-name"
 EOF
 ```
 
-**Note**: Add `terraform/terraform.tfvars` to `.gitignore` for security.
+**Note**: `terraform/terraform.tfvars` is already in `.gitignore` and will not be committed.
 
-### 3. Create GitHub Actions OIDC Provider (First Time Only)
+### 2. Create GitHub Actions OIDC Provider (First Time Only)
 
 Create an OIDC Provider to allow GitHub Actions to access AWS. **Execute once per AWS account**.
 
@@ -127,7 +110,7 @@ aws iam create-open-id-connect-provider \
 
 Skip this step if the OIDC Provider already exists.
 
-### 4. Initialize Terraform
+### 3. Initialize Terraform
 
 ```bash
 # Using Task (recommended)
@@ -135,10 +118,12 @@ task init
 
 # Or directly with Docker Compose
 cd terraform
-docker compose run --rm terraform init -backend-config="backend.tfvars"
+docker compose run --rm terraform init
 ```
 
-### 5. Deploy Infrastructure
+**Note**: This project uses local backend. Terraform state will be stored as `terraform/terraform.tfstate` (already in `.gitignore`).
+
+### 4. Deploy Infrastructure
 
 Terraform will deploy the following:
 - S3 bucket for image storage with CloudFront OAC
@@ -162,7 +147,7 @@ docker compose run --rm terraform apply
 - Terraform uses `lifecycle { ignore_changes = [filename, source_code_hash] }`, so function code changes after initial deployment are not managed by Terraform
 - Update Lambda code via GitHub Actions or manually
 
-### 6. Configure GitHub Repository Secrets
+### 5. Configure GitHub Repository Secrets
 
 Add the following secrets to your GitHub repository:
 
@@ -178,7 +163,7 @@ cd terraform
 docker compose run --rm terraform output github_actions_role_arn
 ```
 
-### 7. Deploy Lambda Function Code
+### 6. Deploy Lambda Function Code
 
 Push to the main branch to automatically deploy Lambda functions:
 
@@ -194,7 +179,7 @@ The GitHub Actions workflow will:
 3. Deploy to AWS Lambda
 4. Publish new versions
 
-### 8. Update CloudFront Distribution (Manual)
+### 7. Update CloudFront Distribution (Manual)
 
 After deploying Lambda functions, attach them to CloudFront:
 
@@ -370,15 +355,13 @@ All resources are defined in `terraform/main.tf`:
 
 ### Backend Configuration
 
-This project uses S3 backend with partial configuration:
+This project uses **local backend** for Terraform state management:
 
-- **State file key**: `cloudfront/terraform.tfstate`
-- **Encryption**: Disabled (`encrypt = false`)
-- **Locking**: Uses S3-based lockfile (`.terraform.lock.hcl`)
+- **State file location**: `terraform/terraform.tfstate`
+- **State locking**: Handled automatically by local backend
+- **Version control**: State file is in `.gitignore` and should NOT be committed
 
-Backend settings (`bucket` and `region`) are provided via `backend.tfvars` file.
-
-**Security Note**: Do not commit `backend.tfvars` or `terraform.tfvars` to public repositories. Use `.example` files as templates.
+**Security Note**: Do not commit `terraform.tfvars` or `terraform.tfstate` to repositories. The `.gitignore` file is already configured to exclude these files.
 
 ### Required Variables
 
@@ -425,11 +408,11 @@ If you see errors like "NoSuchBucket" in the origin-response function:
 
 ### Terraform State Lock Error
 
-If you encounter state lock errors:
-1. Ensure `.terraform.lock.hcl` file in S3 is not corrupted
-2. Check S3 bucket permissions allow reading/writing lockfile
+If you encounter state lock errors with local backend:
+1. Ensure no other Terraform processes are running
+2. Check if `.terraform.tfstate.lock.info` exists and remove it if stale
 3. Wait a few minutes if another operation is in progress
-4. As last resort, manually remove `.terraform.lock.hcl` from S3 (use with caution)
+4. As last resort, manually remove the lock file (use with caution)
 
 ### GitHub Actions Deployment Fails
 
@@ -444,8 +427,8 @@ When using this project, especially in public repositories:
 
 1. **Never commit sensitive files**:
    - `terraform/terraform.tfvars` (contains project configuration)
-   - `terraform/backend.tfvars` (contains state bucket name)
-   - Add these to `.gitignore`
+   - `terraform/terraform.tfstate` (contains infrastructure state)
+   - These are already in `.gitignore`
 
 2. **Use GitHub Secrets** for:
    - `AWS_ROLE_ARN`

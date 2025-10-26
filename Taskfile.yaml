@@ -7,10 +7,10 @@ tasks:
       - task --list
 
   init:
-    desc: Initialize Terraform with backend configuration
+    desc: Initialize Terraform
     dir: terraform
     cmds:
-      - docker compose run --rm terraform init -backend-config="backend.tfvars"
+      - docker compose run --rm terraform init
 
   plan:
     desc: Check infrastructure changes
